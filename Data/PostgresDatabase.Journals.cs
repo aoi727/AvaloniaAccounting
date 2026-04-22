@@ -1,0 +1,733 @@
+﻿using AccountingApp.Models;
+using Npgsql;
+using NpgsqlTypes;
+
+namespace AccountingApp.Data;
+
+public sealed partial class PostgresDatabase
+{
+    public async Task<string> GetNextEntryNumberAsync(int companyId, DateTime entryDate)
+    {
+        var prefix = $"J{entryDate:yyyyMMdd}-";
+        const string sql = @"
+    SELECT MAX(entry_number)
+    FROM journal_vouchers
+    WHERE company_id = @company_id
+      AND entry_number LIKE @prefix";
+
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("company_id", companyId);
+        command.Parameters.AddWithValue("prefix", prefix + "%");
+        var result = await command.ExecuteScalarAsync();
+        var maxNumber = result == DBNull.Value ? null : Convert.ToString(result);
+
+        var next = 1;
+        if (!string.IsNullOrWhiteSpace(maxNumber) &&
+            maxNumber.StartsWith(prefix, StringComparison.Ordinal) &&
+            int.TryParse(maxNumber[prefix.Length..], out var current))
+        {
+            next = current + 1;
+        }
+
+        return prefix + next.ToString("000");
+    }
+
+    public async Task SaveJournalVoucherAsync(
+            int companyId,
+            string entryNumber,
+            DateTime entryDate,
+            string? reference,
+            int createdBy,
+            IReadOnlyList<JournalLineInput> lines)
+    {
+        if (string.IsNullOrWhiteSpace(entryNumber))
+        {
+            throw new InvalidOperationException("伝票番号を入力してください。");
+        }
+
+        var debitTotal = lines.Where(x => x.Side == "debit").Sum(x => x.Amount);
+        var creditTotal = lines.Where(x => x.Side == "credit").Sum(x => x.Amount);
+        if (lines.Count < 2 || debitTotal <= 0 || debitTotal != creditTotal)
+        {
+            throw new InvalidOperationException("借方合計と貸方合計が一致する複数行の仕訳を入力してください。");
+        }
+
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        var committed = false;
+
+        try
+        {
+            await DeleteJournalVoucherAsync(connection, transaction, companyId, entryNumber);
+
+            var voucherId = await InsertJournalVoucherAsync(
+                connection,
+                transaction,
+                companyId,
+                entryNumber,
+                entryDate,
+                reference,
+                createdBy);
+
+            var lineNo = 1;
+            foreach (var line in lines)
+            {
+                await InsertJournalLineAsync(
+                    connection,
+                    transaction,
+                    voucherId,
+                    companyId,
+                    lineNo++,
+                    line);
+            }
+
+            await transaction.CommitAsync();
+            committed = true;
+            await RebuildSubAccountBalancesAsync(companyId);
+        }
+        catch
+        {
+            if (!committed)
+            {
+                await transaction.RollbackAsync();
+            }
+
+            throw;
+        }
+    }
+
+    public async Task DeleteJournalVoucherAsync(int companyId, string entryNumber)
+    {
+        if (string.IsNullOrWhiteSpace(entryNumber))
+        {
+            throw new InvalidOperationException("伝票番号を指定してください。");
+        }
+
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var transaction = await connection.BeginTransactionAsync();
+        var committed = false;
+
+        try
+        {
+            await DeleteAnnualCarryForwardExecutionAsync(connection, transaction, companyId, entryNumber);
+            var deletedCount = await DeleteJournalVoucherAsync(connection, transaction, companyId, entryNumber);
+            if (deletedCount == 0)
+            {
+                throw new InvalidOperationException("指定した仕訳が見つかりませんでした。");
+            }
+
+            await transaction.CommitAsync();
+            committed = true;
+            await RebuildSubAccountBalancesAsync(companyId);
+        }
+        catch
+        {
+            if (!committed)
+            {
+                await transaction.RollbackAsync();
+            }
+
+            throw;
+        }
+    }
+
+    public async Task<IReadOnlyList<JournalVoucherSummary>> GetJournalVoucherSummariesAsync(int companyId)
+    {
+        return await GetJournalVoucherSummariesAsync(companyId, null, null);
+    }
+
+    public async Task<IReadOnlyList<JournalBookRow>> GetJournalBookRowsAsync(int companyId, DateTime? fromDate, DateTime? toDate)
+    {
+        const string sql = @"
+    SELECT l.line_id,
+           v.entry_date,
+           v.entry_number,
+           l.description,
+           v.reference,
+           CASE
+               WHEN l.side = 'debit' THEN
+                   a.code || ' ' || a.name ||
+                   CASE
+                       WHEN s.sub_account_id IS NOT NULL AND s.code <> '0' THEN ' / ' || s.code || ' ' || s.name
+                       ELSE ''
+                   END
+               ELSE NULL
+           END AS debit_account_display,
+           CASE
+               WHEN l.side = 'credit' THEN
+                   a.code || ' ' || a.name ||
+                   CASE
+                       WHEN s.sub_account_id IS NOT NULL AND s.code <> '0' THEN ' / ' || s.code || ' ' || s.name
+                       ELSE ''
+                   END
+               ELSE NULL
+           END AS credit_account_display,
+           CASE WHEN l.side = 'debit' THEN l.amount ELSE 0 END AS debit_amount,
+           CASE WHEN l.side = 'credit' THEN l.amount ELSE 0 END AS credit_amount
+    FROM journal_vouchers v
+    JOIN journal_lines l ON l.voucher_id = v.voucher_id
+    JOIN accounts a ON a.account_id = l.account_id
+    LEFT JOIN sub_accounts s ON s.sub_account_id = NULLIF(l.sub_account_id, 0)
+    WHERE v.company_id = @company_id
+      AND (@from_date IS NULL OR v.entry_date >= @from_date)
+      AND (@to_date IS NULL OR v.entry_date < @to_date)
+    ORDER BY v.entry_date DESC, v.entry_number DESC, l.line_no";
+
+        var rows = new List<JournalBookRow>();
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("company_id", companyId);
+        command.Parameters.Add(new NpgsqlParameter<DateTime?>("from_date", NpgsqlDbType.Date)
+        {
+            TypedValue = fromDate?.Date
+        });
+        command.Parameters.Add(new NpgsqlParameter<DateTime?>("to_date", NpgsqlDbType.Date)
+        {
+            TypedValue = toDate?.Date
+        });
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            rows.Add(new JournalBookRow(
+                reader.GetInt64(0),
+                reader.GetDateTime(1),
+                reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.GetDecimal(7),
+                reader.GetDecimal(8)));
+        }
+
+        return rows;
+    }
+
+    public async Task<IReadOnlyList<JournalVoucherSummary>> GetJournalVoucherSummariesAsync(int companyId, DateTime? fromDate, DateTime? toDate)
+    {
+        const string sql = @"
+    SELECT v.entry_number,
+           v.entry_date,
+           MIN(l.description) AS description,
+           v.reference,
+           STRING_AGG(DISTINCT CASE WHEN l.side = 'debit' THEN a.name END, ' / ') FILTER (WHERE l.side = 'debit') AS debit_accounts,
+           STRING_AGG(DISTINCT CASE WHEN l.side = 'credit' THEN a.name END, ' / ') FILTER (WHERE l.side = 'credit') AS credit_accounts,
+           COALESCE(SUM(CASE WHEN l.side = 'debit' THEN l.amount ELSE 0 END), 0) AS debit_total,
+           COALESCE(SUM(CASE WHEN l.side = 'credit' THEN l.amount ELSE 0 END), 0) AS credit_total,
+           COUNT(*) AS line_count
+    FROM journal_vouchers v
+    JOIN journal_lines l ON l.voucher_id = v.voucher_id
+    JOIN accounts a ON a.account_id = l.account_id
+    WHERE v.company_id = @company_id
+      AND (@from_date IS NULL OR v.entry_date >= @from_date)
+      AND (@to_date IS NULL OR v.entry_date < @to_date)
+    GROUP BY v.voucher_id, v.entry_number, v.entry_date, v.reference
+    ORDER BY v.entry_date DESC, v.entry_number DESC";
+
+        var vouchers = new List<JournalVoucherSummary>();
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("company_id", companyId);
+        command.Parameters.Add(new NpgsqlParameter<DateTime?>("from_date", NpgsqlDbType.Date)
+        {
+            TypedValue = fromDate?.Date
+        });
+        command.Parameters.Add(new NpgsqlParameter<DateTime?>("to_date", NpgsqlDbType.Date)
+        {
+            TypedValue = toDate?.Date
+        });
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            vouchers.Add(new JournalVoucherSummary(
+                reader.GetString(0),
+                reader.GetDateTime(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.GetDecimal(6),
+                reader.GetDecimal(7),
+                Convert.ToInt32(reader.GetInt64(8))));
+        }
+
+        return vouchers;
+    }
+
+    public async Task<IReadOnlyList<JournalLine>> GetJournalLinesAsync(int companyId, string entryNumber)
+    {
+        const string sql = @"
+    SELECT l.line_id,
+           l.side,
+           l.account_id,
+           a.code AS account_code,
+           a.name AS account_name,
+           NULLIF(l.sub_account_id, 0) AS sub_account_id,
+           s.code AS sub_account_code,
+           s.name AS sub_account_name,
+           l.amount,
+           l.tax_code_id,
+           l.tax_rate,
+           COALESCE(l.tax_amount, 0) AS tax_amount,
+           COALESCE(l.creditable_tax_amount, 0) AS creditable_tax_amount,
+           COALESCE(l.non_creditable_tax_amount, 0) AS non_creditable_tax_amount,
+           COALESCE(l.tax_input_type, 'excluded') AS tax_input_type,
+           l.description,
+           l.partner_id,
+           p.code AS partner_code,
+           p.name AS partner_name,
+           l.invoice_number,
+           l.invoice_registration_number,
+           l.invoice_status,
+           l.purchase_credit_rate
+    FROM journal_vouchers v
+    JOIN journal_lines l ON l.voucher_id = v.voucher_id
+    JOIN accounts a ON a.account_id = l.account_id
+    LEFT JOIN sub_accounts s ON s.sub_account_id = l.sub_account_id
+    LEFT JOIN business_partners p ON p.partner_id = l.partner_id
+    WHERE v.company_id = @company_id
+      AND v.entry_number = @entry_number
+    ORDER BY l.line_no";
+
+        var lines = new List<JournalLine>();
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("company_id", companyId);
+        command.Parameters.AddWithValue("entry_number", entryNumber);
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            lines.Add(new JournalLine(
+                reader.GetInt64(0),
+                reader.GetString(1),
+                reader.GetInt32(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetInt32(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.GetDecimal(8),
+                reader.IsDBNull(9) ? null : reader.GetInt32(9),
+                reader.IsDBNull(10) ? null : reader.GetDecimal(10),
+                reader.GetDecimal(11),
+                reader.GetDecimal(12),
+                reader.GetDecimal(13),
+                reader.GetString(14),
+                reader.IsDBNull(15) ? null : reader.GetString(15),
+                reader.IsDBNull(16) ? null : reader.GetInt32(16),
+                reader.IsDBNull(17) ? null : reader.GetString(17),
+                reader.IsDBNull(18) ? null : reader.GetString(18),
+                reader.IsDBNull(19) ? null : reader.GetString(19),
+                reader.IsDBNull(20) ? null : reader.GetString(20),
+                reader.IsDBNull(21) ? null : reader.GetString(21),
+                reader.IsDBNull(22) ? null : reader.GetDecimal(22)));
+        }
+
+        return lines;
+    }
+
+    public async Task<IReadOnlyList<CashbookLine>> GetCashbookLinesAsync(int companyId, int accountId, int? subAccountId)
+    {
+        const string sql = @"
+    WITH target_lines AS (
+        SELECT l.line_id,
+               l.voucher_id,
+               v.entry_date,
+               v.entry_number,
+               l.description,
+               v.reference,
+               p.code AS partner_code,
+               p.name AS partner_name,
+               l.invoice_number,
+               l.side,
+               l.amount
+        FROM journal_lines l
+        JOIN journal_vouchers v ON v.voucher_id = l.voucher_id
+        LEFT JOIN business_partners p ON p.partner_id = l.partner_id
+        WHERE l.company_id = @company_id
+          AND l.account_id = @account_id
+          AND (@sub_account_id IS NULL OR l.sub_account_id = @sub_account_id)
+    )
+    SELECT t.line_id,
+           t.entry_date,
+           t.entry_number,
+           t.description,
+           t.reference,
+           CASE WHEN t.side = 'debit' THEN t.amount ELSE 0 END AS receipt,
+           CASE WHEN t.side = 'credit' THEN t.amount ELSE 0 END AS payment,
+           CASE
+               WHEN cp.counterpart_count = 1 THEN cp.account_code
+               WHEN cp.counterpart_count > 1 THEN '諸口'
+               ELSE NULL
+           END AS counterpart_account_code,
+           CASE
+               WHEN cp.counterpart_count = 1 THEN cp.account_name
+               WHEN cp.counterpart_count > 1 THEN '複合仕訳'
+               ELSE NULL
+           END AS counterpart_account_name,
+           CASE WHEN cp.counterpart_count = 1 THEN cp.sub_account_code ELSE NULL END AS counterpart_sub_account_code,
+           CASE WHEN cp.counterpart_count = 1 THEN cp.sub_account_name ELSE NULL END AS counterpart_sub_account_name,
+           t.partner_code,
+           t.partner_name,
+           t.invoice_number
+    FROM target_lines t
+    LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS counterpart_count,
+               MIN(a.code) AS account_code,
+               MIN(a.name) AS account_name,
+               MIN(s.code) AS sub_account_code,
+               MIN(s.name) AS sub_account_name
+        FROM journal_lines cl
+        JOIN accounts a ON a.account_id = cl.account_id
+        LEFT JOIN sub_accounts s ON s.sub_account_id = cl.sub_account_id
+        WHERE cl.voucher_id = t.voucher_id
+          AND cl.side <> t.side
+    ) cp ON TRUE
+    ORDER BY t.entry_date, t.line_id";
+
+        var lines = new List<CashbookLine>();
+        var balance = await GetOpeningBalanceAsync(companyId, accountId, subAccountId);
+
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("company_id", companyId);
+        command.Parameters.AddWithValue("account_id", accountId);
+        command.Parameters.Add(new NpgsqlParameter<int?>("sub_account_id", NpgsqlDbType.Integer)
+        {
+            TypedValue = subAccountId
+        });
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            var receipt = reader.GetDecimal(5);
+            var payment = reader.GetDecimal(6);
+            balance += receipt - payment;
+
+            lines.Add(new CashbookLine(
+                reader.GetInt64(0),
+                reader.GetDateTime(1),
+                reader.IsDBNull(2) ? "" : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetString(9),
+                reader.IsDBNull(10) ? null : reader.GetString(10),
+                reader.IsDBNull(11) ? null : reader.GetString(11),
+                reader.IsDBNull(12) ? null : reader.GetString(12),
+                reader.IsDBNull(13) ? null : reader.GetString(13),
+                receipt,
+                payment,
+                balance));
+        }
+
+        return lines;
+    }
+
+    public async Task<decimal> GetCashbookOpeningBalanceAsync(int companyId, int accountId, int? subAccountId)
+    {
+        return await GetOpeningBalanceAsync(companyId, accountId, subAccountId);
+    }
+
+    public async Task<IReadOnlyList<GeneralLedgerLine>> GetGeneralLedgerLinesAsync(int companyId, int accountId, int? subAccountId)
+    {
+        const string sql = @"
+    WITH account_info AS (
+        SELECT balance_side
+        FROM accounts
+        WHERE company_id = @company_id
+          AND account_id = @account_id
+    ),
+    target_lines AS (
+        SELECT l.line_id,
+               l.voucher_id,
+               v.entry_date,
+               v.entry_number,
+               l.description,
+               v.reference,
+               p.code AS partner_code,
+               p.name AS partner_name,
+               l.invoice_number,
+               l.side,
+               l.amount,
+               ai.balance_side
+        FROM journal_lines l
+        JOIN journal_vouchers v ON v.voucher_id = l.voucher_id
+        JOIN account_info ai ON TRUE
+        LEFT JOIN business_partners p ON p.partner_id = l.partner_id
+        WHERE l.company_id = @company_id
+          AND l.account_id = @account_id
+          AND (@sub_account_id IS NULL OR l.sub_account_id = @sub_account_id)
+    )
+    SELECT t.line_id,
+           t.entry_date,
+           t.entry_number,
+           t.description,
+           t.reference,
+           CASE
+               WHEN cp.counterpart_count = 1 THEN cp.account_code
+               WHEN cp.counterpart_count > 1 THEN '諸口'
+               ELSE NULL
+           END AS counterpart_account_code,
+           CASE
+               WHEN cp.counterpart_count = 1 THEN cp.account_name
+               WHEN cp.counterpart_count > 1 THEN '複合仕訳'
+               ELSE NULL
+           END AS counterpart_account_name,
+           CASE WHEN cp.counterpart_count = 1 THEN cp.sub_account_code ELSE NULL END AS counterpart_sub_account_code,
+           CASE WHEN cp.counterpart_count = 1 THEN cp.sub_account_name ELSE NULL END AS counterpart_sub_account_name,
+           t.partner_code,
+           t.partner_name,
+           t.invoice_number,
+           CASE WHEN t.side = 'debit' THEN t.amount ELSE 0 END AS debit_amount,
+           CASE WHEN t.side = 'credit' THEN t.amount ELSE 0 END AS credit_amount,
+           CASE
+               WHEN t.balance_side = 'debit' AND t.side = 'debit' THEN t.amount
+               WHEN t.balance_side = 'debit' AND t.side = 'credit' THEN -t.amount
+               WHEN t.balance_side = 'credit' AND t.side = 'credit' THEN t.amount
+               ELSE -t.amount
+           END AS balance_change
+    FROM target_lines t
+    LEFT JOIN LATERAL (
+        SELECT COUNT(*) AS counterpart_count,
+               MIN(a.code) AS account_code,
+               MIN(a.name) AS account_name,
+               MIN(s.code) AS sub_account_code,
+               MIN(s.name) AS sub_account_name
+        FROM journal_lines cl
+        JOIN accounts a ON a.account_id = cl.account_id
+        LEFT JOIN sub_accounts s ON s.sub_account_id = cl.sub_account_id
+        WHERE cl.voucher_id = t.voucher_id
+          AND cl.side <> t.side
+    ) cp ON TRUE
+    ORDER BY t.entry_date, t.line_id";
+
+        var lines = new List<GeneralLedgerLine>();
+        var balance = await GetOpeningBalanceAsync(companyId, accountId, subAccountId);
+
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("company_id", companyId);
+        command.Parameters.AddWithValue("account_id", accountId);
+        command.Parameters.Add(new NpgsqlParameter<int?>("sub_account_id", NpgsqlDbType.Integer)
+        {
+            TypedValue = subAccountId
+        });
+
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            balance += reader.GetDecimal(14);
+
+            lines.Add(new GeneralLedgerLine(
+                reader.GetInt64(0),
+                reader.GetDateTime(1),
+                reader.IsDBNull(2) ? "" : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetString(9),
+                reader.IsDBNull(10) ? null : reader.GetString(10),
+                reader.IsDBNull(11) ? null : reader.GetString(11),
+                reader.GetDecimal(12),
+                reader.GetDecimal(13),
+                balance));
+        }
+
+        return lines;
+    }
+
+    public async Task<decimal> GetGeneralLedgerOpeningBalanceAsync(int companyId, int accountId, int? subAccountId)
+    {
+        return await GetOpeningBalanceAsync(companyId, accountId, subAccountId);
+    }
+
+    private async Task<decimal> GetOpeningBalanceAsync(int companyId, int accountId, int? subAccountId)
+    {
+        if (!subAccountId.HasValue)
+        {
+            const string accountSql = @"
+    SELECT COALESCE(SUM(balance), 0)
+    FROM sub_accounts
+    WHERE company_id = @company_id
+      AND account_id = @account_id
+      AND is_active = TRUE";
+
+            await using var accountConnection = new NpgsqlConnection(_connectionString);
+            await accountConnection.OpenAsync();
+            await using var accountCommand = new NpgsqlCommand(accountSql, accountConnection);
+            accountCommand.Parameters.AddWithValue("company_id", companyId);
+            accountCommand.Parameters.AddWithValue("account_id", accountId);
+            var accountResult = await accountCommand.ExecuteScalarAsync();
+            return accountResult == null || accountResult == DBNull.Value ? 0 : Convert.ToDecimal(accountResult);
+        }
+
+        const string sql = @"
+    SELECT COALESCE(balance, 0)
+    FROM sub_accounts
+    WHERE company_id = @company_id
+      AND account_id = @account_id
+      AND sub_account_id = @sub_account_id";
+
+        await using var connection = new NpgsqlConnection(_connectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("company_id", companyId);
+        command.Parameters.AddWithValue("account_id", accountId);
+        command.Parameters.AddWithValue("sub_account_id", subAccountId.Value);
+        var result = await command.ExecuteScalarAsync();
+        return result == null || result == DBNull.Value ? 0 : Convert.ToDecimal(result);
+    }
+
+    private static async Task<long> InsertJournalVoucherAsync(
+            NpgsqlConnection connection,
+            NpgsqlTransaction transaction,
+            int companyId,
+            string entryNumber,
+            DateTime entryDate,
+            string? reference,
+            int createdBy)
+    {
+        const string sql = @"
+    INSERT INTO journal_vouchers (
+        company_id, entry_date, entry_number, reference, created_by, updated_at
+    )
+    VALUES (
+        @company_id, @entry_date, @entry_number, @reference, @created_by, CURRENT_TIMESTAMP
+    )
+    RETURNING voucher_id";
+
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        command.Parameters.AddWithValue("company_id", companyId);
+        command.Parameters.AddWithValue("entry_date", entryDate.Date);
+        command.Parameters.AddWithValue("entry_number", entryNumber.Trim());
+        command.Parameters.Add(new NpgsqlParameter<string?>("reference", NpgsqlDbType.Varchar)
+        {
+            TypedValue = string.IsNullOrWhiteSpace(reference) ? null : reference.Trim()
+        });
+        command.Parameters.AddWithValue("created_by", createdBy);
+        var result = await command.ExecuteScalarAsync();
+        return Convert.ToInt64(result);
+    }
+
+    private static async Task InsertJournalLineAsync(
+            NpgsqlConnection connection,
+            NpgsqlTransaction transaction,
+            long voucherId,
+            int companyId,
+            int lineNo,
+            JournalLineInput line)
+    {
+        const string sql = @"
+    INSERT INTO journal_lines (
+        voucher_id, company_id, line_no, side, account_id, sub_account_id,
+        amount, tax_code_id, tax_rate, tax_amount, creditable_tax_amount, non_creditable_tax_amount,
+        tax_input_type, description,
+        partner_id, invoice_number, invoice_registration_number, invoice_status, purchase_credit_rate,
+        updated_at
+    )
+    VALUES (
+        @voucher_id, @company_id, @line_no, @side, @account_id, @sub_account_id,
+        @amount, @tax_code_id, @tax_rate, @tax_amount, @creditable_tax_amount, @non_creditable_tax_amount,
+        @tax_input_type, @description,
+        @partner_id, @invoice_number, @invoice_registration_number, @invoice_status, @purchase_credit_rate,
+        CURRENT_TIMESTAMP
+    )";
+
+        if (line.Side is not ("debit" or "credit"))
+        {
+            throw new InvalidOperationException("借方または貸方を指定してください。");
+        }
+
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        command.Parameters.AddWithValue("voucher_id", voucherId);
+        command.Parameters.AddWithValue("company_id", companyId);
+        command.Parameters.AddWithValue("line_no", lineNo);
+        command.Parameters.AddWithValue("side", line.Side);
+        command.Parameters.AddWithValue("account_id", line.AccountId);
+        command.Parameters.AddWithValue("sub_account_id", line.SubAccountId.GetValueOrDefault());
+        command.Parameters.AddWithValue("amount", line.Amount);
+        command.Parameters.Add(new NpgsqlParameter<int?>("tax_code_id", NpgsqlDbType.Integer)
+        {
+            TypedValue = line.TaxCodeId
+        });
+        command.Parameters.Add(new NpgsqlParameter<decimal?>("tax_rate", NpgsqlDbType.Numeric)
+        {
+            TypedValue = line.TaxRate
+        });
+        command.Parameters.AddWithValue("tax_amount", line.TaxAmount);
+        command.Parameters.AddWithValue("creditable_tax_amount", line.CreditableTaxAmount);
+        command.Parameters.AddWithValue("non_creditable_tax_amount", line.NonCreditableTaxAmount);
+        command.Parameters.AddWithValue("tax_input_type", line.TaxInputType);
+        command.Parameters.Add(new NpgsqlParameter<string?>("description", NpgsqlDbType.Text)
+        {
+            TypedValue = string.IsNullOrWhiteSpace(line.Description) ? null : line.Description.Trim()
+        });
+        command.Parameters.Add(new NpgsqlParameter<int?>("partner_id", NpgsqlDbType.Integer)
+        {
+            TypedValue = line.PartnerId
+        });
+        command.Parameters.Add(new NpgsqlParameter<string?>("invoice_number", NpgsqlDbType.Varchar)
+        {
+            TypedValue = string.IsNullOrWhiteSpace(line.InvoiceNumber) ? null : line.InvoiceNumber.Trim()
+        });
+        command.Parameters.Add(new NpgsqlParameter<string?>("invoice_registration_number", NpgsqlDbType.Varchar)
+        {
+            TypedValue = string.IsNullOrWhiteSpace(line.InvoiceRegistrationNumber) ? null : line.InvoiceRegistrationNumber.Trim()
+        });
+        command.Parameters.Add(new NpgsqlParameter<string?>("invoice_status", NpgsqlDbType.Varchar)
+        {
+            TypedValue = string.IsNullOrWhiteSpace(line.InvoiceStatus) ? null : line.InvoiceStatus
+        });
+        command.Parameters.Add(new NpgsqlParameter<decimal?>("purchase_credit_rate", NpgsqlDbType.Numeric)
+        {
+            TypedValue = line.PurchaseCreditRate
+        });
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private static async Task DeleteAnnualCarryForwardExecutionAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        int companyId,
+        string entryNumber)
+    {
+        const string sql = @"
+    DELETE FROM annual_carry_forwards
+    WHERE company_id = @company_id
+      AND entry_number = @entry_number";
+
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        command.Parameters.AddWithValue("company_id", companyId);
+        command.Parameters.AddWithValue("entry_number", entryNumber.Trim());
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private static async Task<int> DeleteJournalVoucherAsync(NpgsqlConnection connection, NpgsqlTransaction transaction, int companyId, string entryNumber)
+    {
+        const string voucherSql = "DELETE FROM journal_vouchers WHERE company_id = @company_id AND entry_number = @entry_number";
+        await using (var voucherCommand = new NpgsqlCommand(voucherSql, connection, transaction))
+        {
+            voucherCommand.Parameters.AddWithValue("company_id", companyId);
+            voucherCommand.Parameters.AddWithValue("entry_number", entryNumber.Trim());
+            return await voucherCommand.ExecuteNonQueryAsync();
+        }
+    }
+}
+

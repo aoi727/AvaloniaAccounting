@@ -1,0 +1,15 @@
+bin/
+obj/
+.vs/
+
+*.user
+*.suo
+TestResults/
+
+.tmp/
+.dotnet_home/
+.nuget/
+
+appsettings.json
+appsettings.Development.json
+secrets.json
