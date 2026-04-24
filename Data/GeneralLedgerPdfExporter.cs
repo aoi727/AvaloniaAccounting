@@ -39,7 +39,7 @@ public static class GeneralLedgerPdfExporter
 
         using var stream = File.Open(outputPath, FileMode.Create, FileAccess.Write, FileShare.None);
         using var document = SKDocument.CreatePdf(stream);
-        using var typeface = LoadJapaneseTypeface();
+        using var typeface = PdfTypefaceProvider.LoadJapaneseTypeface();
 
         var columns = new[] { 74f, 90f, 148f, 128f, 168f, 58f, 58f, 70f };
         var totalWidth = columns.Sum();
@@ -225,27 +225,6 @@ public static class GeneralLedgerPdfExporter
         }
 
         return string.IsNullOrWhiteSpace(partner) ? line.InvoiceNumber : $"{partner}/{line.InvoiceNumber}";
-    }
-
-    private static SKTypeface LoadJapaneseTypeface()
-    {
-        var fontsFolder = Environment.GetFolderPath(Environment.SpecialFolder.Fonts);
-        var candidates = new[] { "YuGothR.ttc", "YuGothM.ttc", "meiryo.ttc", "msgothic.ttc" };
-
-        foreach (var fileName in candidates)
-        {
-            var path = Path.Combine(fontsFolder, fileName);
-            if (File.Exists(path))
-            {
-                var typeface = SKTypeface.FromFile(path);
-                if (typeface is not null)
-                {
-                    return typeface;
-                }
-            }
-        }
-
-        return SKTypeface.Default;
     }
 
     private sealed record LedgerPdfRow(

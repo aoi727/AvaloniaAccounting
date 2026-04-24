@@ -61,6 +61,8 @@ public sealed partial class PostgresDatabase
 
         try
         {
+            var existingDate = await GetJournalVoucherDateAsync(connection, transaction, companyId, entryNumber);
+            await EnsureJournalVoucherEditableAsync(connection, transaction, companyId, entryNumber, entryDate);
             await DeleteJournalVoucherAsync(connection, transaction, companyId, entryNumber);
 
             var voucherId = await InsertJournalVoucherAsync(
@@ -84,6 +86,17 @@ public sealed partial class PostgresDatabase
                     line);
             }
 
+            await EnsureOperationLogSchemaAsync(connection, transaction);
+            await WriteOperationLogAsync(
+                connection,
+                transaction,
+                companyId,
+                createdBy,
+                existingDate.HasValue ? "journal_update" : "journal_create",
+                "journal",
+                entryNumber,
+                existingDate.HasValue ? $"仕訳を更新しました: {entryNumber}" : $"仕訳を登録しました: {entryNumber}");
+
             await transaction.CommitAsync();
             committed = true;
             await RebuildSubAccountBalancesAsync(companyId);
@@ -99,7 +112,7 @@ public sealed partial class PostgresDatabase
         }
     }
 
-    public async Task DeleteJournalVoucherAsync(int companyId, string entryNumber)
+    public async Task DeleteJournalVoucherAsync(int companyId, int userId, string entryNumber)
     {
         if (string.IsNullOrWhiteSpace(entryNumber))
         {
@@ -113,12 +126,30 @@ public sealed partial class PostgresDatabase
 
         try
         {
+            var existingDate = await GetJournalVoucherDateAsync(connection, transaction, companyId, entryNumber);
+            if (!existingDate.HasValue)
+            {
+                throw new InvalidOperationException("指定した仕訳が見つかりませんでした。");
+            }
+
+            await EnsureJournalDateOpenAsync(connection, transaction, companyId, existingDate.Value);
             await DeleteAnnualCarryForwardExecutionAsync(connection, transaction, companyId, entryNumber);
             var deletedCount = await DeleteJournalVoucherAsync(connection, transaction, companyId, entryNumber);
             if (deletedCount == 0)
             {
                 throw new InvalidOperationException("指定した仕訳が見つかりませんでした。");
             }
+
+            await EnsureOperationLogSchemaAsync(connection, transaction);
+            await WriteOperationLogAsync(
+                connection,
+                transaction,
+                companyId,
+                userId,
+                "journal_delete",
+                "journal",
+                entryNumber,
+                $"仕訳を削除しました: {entryNumber}");
 
             await transaction.CommitAsync();
             committed = true;
@@ -602,14 +633,16 @@ public sealed partial class PostgresDatabase
             string entryNumber,
             DateTime entryDate,
             string? reference,
-            int createdBy)
+            int createdBy,
+            string sourceType = "manual",
+            string? sourceKey = null)
     {
         const string sql = @"
     INSERT INTO journal_vouchers (
-        company_id, entry_date, entry_number, reference, created_by, updated_at
+        company_id, entry_date, entry_number, reference, created_by, source_type, source_key, updated_at
     )
     VALUES (
-        @company_id, @entry_date, @entry_number, @reference, @created_by, CURRENT_TIMESTAMP
+        @company_id, @entry_date, @entry_number, @reference, @created_by, @source_type, @source_key, CURRENT_TIMESTAMP
     )
     RETURNING voucher_id";
 
@@ -622,6 +655,11 @@ public sealed partial class PostgresDatabase
             TypedValue = string.IsNullOrWhiteSpace(reference) ? null : reference.Trim()
         });
         command.Parameters.AddWithValue("created_by", createdBy);
+        command.Parameters.AddWithValue("source_type", sourceType);
+        command.Parameters.Add(new NpgsqlParameter<string?>("source_key", NpgsqlDbType.Varchar)
+        {
+            TypedValue = sourceKey
+        });
         var result = await command.ExecuteScalarAsync();
         return Convert.ToInt64(result);
     }

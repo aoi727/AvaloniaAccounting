@@ -39,7 +39,7 @@ public static class ProfitAndLossPdfExporter
 
         using var stream = File.Open(outputPath, FileMode.Create, FileAccess.Write, FileShare.None);
         using var document = SKDocument.CreatePdf(stream);
-        using var typeface = LoadJapaneseTypeface();
+        using var typeface = PdfTypefaceProvider.LoadJapaneseTypeface();
 
         var rows = BuildRows(summary);
         using var canvas = document.BeginPage(PageWidth, PageHeight);
@@ -175,33 +175,6 @@ public static class ProfitAndLossPdfExporter
             bodyPaint);
         canvas.DrawText(companyName, Margin + 4f, 116f, SKTextAlign.Left, bodyFont, bodyPaint);
         canvas.DrawText("(単位：円)", PageWidth - Margin, 116f, SKTextAlign.Right, bodyFont, bodyPaint);
-    }
-
-    private static SKTypeface LoadJapaneseTypeface()
-    {
-        var fontsFolder = Environment.GetFolderPath(Environment.SpecialFolder.Fonts);
-        var candidates = new[]
-        {
-            "YuGothR.ttc",
-            "YuGothM.ttc",
-            "meiryo.ttc",
-            "msgothic.ttc"
-        };
-
-        foreach (var fileName in candidates)
-        {
-            var path = Path.Combine(fontsFolder, fileName);
-            if (File.Exists(path))
-            {
-                var typeface = SKTypeface.FromFile(path);
-                if (typeface is not null)
-                {
-                    return typeface;
-                }
-            }
-        }
-
-        return SKTypeface.Default;
     }
 
     private static string FormatFinancialStatementAmount(decimal amount)

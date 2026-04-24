@@ -76,11 +76,14 @@ public sealed partial class PostgresDatabase
 
     public async Task UpdateUserAsync(
             int companyId,
+            int actingUserId,
+            bool actingUserIsAdmin,
             int userId,
             string displayName,
             string role,
             bool isActive,
-            string? newPassword)
+            string? newPassword,
+            string? currentPassword)
     {
         await using var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync();
@@ -88,6 +91,35 @@ public sealed partial class PostgresDatabase
 
         try
         {
+            if (!actingUserIsAdmin && actingUserId != userId)
+            {
+                throw new InvalidOperationException("他のユーザーのパスワードは変更できません。");
+            }
+
+            if (!string.IsNullOrWhiteSpace(newPassword) && (!actingUserIsAdmin || actingUserId == userId))
+            {
+                const string passwordSql = @"
+    SELECT password_hash, password_salt
+    FROM users
+    WHERE user_id = @user_id";
+                await using var passwordCommand = new NpgsqlCommand(passwordSql, connection, transaction);
+                passwordCommand.Parameters.AddWithValue("user_id", userId);
+                await using var reader = await passwordCommand.ExecuteReaderAsync();
+                if (!await reader.ReadAsync())
+                {
+                    throw new InvalidOperationException("変更対象のユーザーが見つかりません。");
+                }
+
+                var storedHash = reader.GetString(0);
+                var storedSalt = reader.GetString(1);
+                await reader.CloseAsync();
+
+                if (string.IsNullOrWhiteSpace(currentPassword) || !PasswordHasher.Verify(currentPassword, storedHash, storedSalt))
+                {
+                    throw new InvalidOperationException("現在のパスワードが正しくありません。");
+                }
+            }
+
             if (string.IsNullOrWhiteSpace(newPassword))
             {
                 const string userSql = @"

@@ -17,15 +17,16 @@ public sealed class UserFormView : UserControl
     private readonly Action _backToDashboard;
     private readonly TextBox _loginId = new() { PlaceholderText = "例: yamada" };
     private readonly TextBox _displayName = new() { PlaceholderText = "例: 山田 太郎" };
-    private readonly TextBox _password = new() { PlaceholderText = "新規は必須、編集時は変更する場合のみ入力", PasswordChar = '*' };
-    private readonly TextBox _passwordConfirm = new() { PlaceholderText = "新規は必須、編集時は変更する場合のみ入力", PasswordChar = '*' };
+    private readonly TextBox _currentPassword = new() { PlaceholderText = "パスワード変更時のみ入力", PasswordChar = '*' };
+    private readonly TextBox _password = new() { PlaceholderText = "新しいパスワード", PasswordChar = '*' };
+    private readonly TextBox _passwordConfirm = new() { PlaceholderText = "新しいパスワード(確認)", PasswordChar = '*' };
     private readonly CheckBox _showPassword = new() { Content = "パスワードを表示" };
     private readonly ComboBox _role = new() { ItemsSource = Roles, SelectedIndex = 1 };
     private readonly CheckBox _isActive = new() { Content = "有効", IsChecked = true };
     private readonly StackPanel _users = new() { Spacing = 8 };
     private readonly TextBlock _message = ViewHelpers.Body("ユーザーを追加・編集できます。");
     private readonly Button _saveButton = ViewHelpers.PrimaryButton("登録する");
-    private readonly Button _newButton = ViewHelpers.SecondaryButton("新規入力");
+    private readonly Button _newButton = ViewHelpers.SecondaryButton("新規に戻す");
     private int? _editingUserId;
 
     public UserFormView(PostgresDatabase database, AppUser currentUser, Action backToDashboard)
@@ -58,9 +59,11 @@ public sealed class UserFormView : UserControl
                 _loginId,
                 ViewHelpers.Label("表示名"),
                 _displayName,
-                ViewHelpers.Label("パスワード"),
+                ViewHelpers.Label("現在のパスワード"),
+                _currentPassword,
+                ViewHelpers.Label("新しいパスワード"),
                 _password,
-                ViewHelpers.Label("パスワード確認"),
+                ViewHelpers.Label("新しいパスワード(確認)"),
                 _passwordConfirm,
                 _showPassword,
                 ViewHelpers.Label("ロール"),
@@ -201,13 +204,15 @@ public sealed class UserFormView : UserControl
         _loginId.Text = user.LoginId;
         _loginId.IsEnabled = false;
         _displayName.Text = user.DisplayName;
+        _currentPassword.Text = "";
         _password.Text = "";
         _passwordConfirm.Text = "";
         _showPassword.IsChecked = false;
         _role.SelectedItem = user.Role;
         _isActive.IsChecked = user.IsActive;
         _saveButton.Content = "更新する";
-        SetMessage($"{user.LoginId} を編集中です。パスワードは変更する場合のみ入力してください。", false);
+        _currentPassword.IsVisible = ShouldRequireCurrentPassword(user.UserId);
+        SetMessage($"{user.LoginId} を編集中です。パスワードを変更する場合のみ入力してください。", false);
     }
 
     private void ClearForm()
@@ -216,19 +221,20 @@ public sealed class UserFormView : UserControl
         _loginId.Text = "";
         _loginId.IsEnabled = true;
         _displayName.Text = "";
+        _currentPassword.Text = "";
         _password.Text = "";
         _passwordConfirm.Text = "";
         _showPassword.IsChecked = false;
         _role.SelectedIndex = 1;
         _isActive.IsChecked = true;
         _saveButton.Content = "登録する";
-        SetMessage("新しいユーザーを入力できます。", false);
+        _currentPassword.IsVisible = false;
+        SetMessage("新しいユーザーを登録できます。", false);
     }
 
     private async Task SaveAsync()
     {
-        if (string.IsNullOrWhiteSpace(_loginId.Text) ||
-            string.IsNullOrWhiteSpace(_displayName.Text))
+        if (string.IsNullOrWhiteSpace(_loginId.Text) || string.IsNullOrWhiteSpace(_displayName.Text))
         {
             SetMessage("ログインIDと表示名を入力してください。", true);
             return;
@@ -240,6 +246,7 @@ public sealed class UserFormView : UserControl
             return;
         }
 
+        var currentPassword = _currentPassword.Text ?? "";
         var password = _password.Text ?? "";
         var passwordConfirm = _passwordConfirm.Text ?? "";
         if (!_editingUserId.HasValue && string.IsNullOrWhiteSpace(password))
@@ -256,9 +263,15 @@ public sealed class UserFormView : UserControl
 
         if (!string.IsNullOrWhiteSpace(password) || !string.IsNullOrWhiteSpace(passwordConfirm))
         {
+            if (_editingUserId.HasValue && ShouldRequireCurrentPassword(_editingUserId.Value) && string.IsNullOrWhiteSpace(currentPassword))
+            {
+                SetMessage("パスワード変更時は現在のパスワードを入力してください。", true);
+                return;
+            }
+
             if (!string.Equals(password, passwordConfirm, StringComparison.Ordinal))
             {
-                SetMessage("パスワードと確認用パスワードが一致しません。", true);
+                SetMessage("新しいパスワードと確認用パスワードが一致しません。", true);
                 return;
             }
         }
@@ -276,11 +289,14 @@ public sealed class UserFormView : UserControl
             {
                 await _database.UpdateUserAsync(
                     _currentUser.CompanyId,
+                    _currentUser.UserId,
+                    IsAdminSession(),
                     _editingUserId.Value,
                     _displayName.Text.Trim(),
                     selectedRole,
                     _isActive.IsChecked == true,
-                    string.IsNullOrWhiteSpace(password) ? null : password);
+                    string.IsNullOrWhiteSpace(password) ? null : password,
+                    string.IsNullOrWhiteSpace(currentPassword) ? null : currentPassword);
                 SetMessage("ユーザーを更新しました。", false);
             }
             else
@@ -335,7 +351,18 @@ public sealed class UserFormView : UserControl
     private void UpdatePasswordVisibility()
     {
         var show = _showPassword.IsChecked == true;
+        _currentPassword.PasswordChar = show ? '\0' : '*';
         _password.PasswordChar = show ? '\0' : '*';
         _passwordConfirm.PasswordChar = show ? '\0' : '*';
+    }
+
+    private bool IsAdminSession()
+    {
+        return string.Equals(_currentUser.Role, "admin", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool ShouldRequireCurrentPassword(int editingUserId)
+    {
+        return !IsAdminSession() || editingUserId == _currentUser.UserId;
     }
 }

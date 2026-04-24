@@ -11,6 +11,7 @@ public sealed partial class PostgresDatabase
         await using var connection = new NpgsqlConnection(_connectionString);
         await connection.OpenAsync();
         await EnsureAnnualCarryForwardSchemaAsync(connection, null);
+        await EnsureAnnualClosingSchemaAsync(connection, null);
 
         var settings = await GetCompanySettingsAsync(companyId);
         var nextFiscalYearStart = GetFiscalYearStartForDate(settings.FiscalYearStart, today.Date);
@@ -19,6 +20,7 @@ public sealed partial class PostgresDatabase
 
         var equityAccount = await FindCarryForwardEquityAccountAsync(connection, null, companyId);
         var execution = await GetAnnualCarryForwardExecutionAsync(connection, null, companyId, nextFiscalYearStart);
+        var closing = await GetAnnualClosingAsync(connection, null, companyId, sourceFiscalYearStart);
         var netIncome = await GetCurrentPeriodNetIncomeAsync(companyId, sourceFiscalYearStart, sourceFiscalYearEnd);
 
         return new AnnualCarryForwardStatus(
@@ -28,8 +30,11 @@ public sealed partial class PostgresDatabase
             $"{equityAccount.Code} {equityAccount.Name}",
             netIncome,
             execution is not null,
+            string.Equals(closing?.Status, "closed", StringComparison.OrdinalIgnoreCase),
             execution?.EntryNumber,
-            execution?.CreatedAt);
+            execution?.CreatedAt,
+            closing?.UnlockReason,
+            closing?.UnlockedAt);
     }
 
     public async Task ExecuteAnnualCarryForwardAsync(int companyId, int userId, DateTime today)
@@ -42,6 +47,8 @@ public sealed partial class PostgresDatabase
         try
         {
             await EnsureAnnualCarryForwardSchemaAsync(connection, transaction);
+            await EnsureAnnualClosingSchemaAsync(connection, transaction);
+            await EnsureOperationLogSchemaAsync(connection, transaction);
             await EnsureDefaultSubAccountsAsync(connection, transaction, companyId);
 
             var settings = await GetCompanySettingsAsync(companyId);

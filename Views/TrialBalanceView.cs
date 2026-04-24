@@ -160,7 +160,7 @@ public sealed class TrialBalanceView : UserControl
         {
             _isAdjustingDateRange = true;
             var fromDate = (_fromDate.SelectedDate?.DateTime ?? DateTime.Today).Date;
-            _toDate.SelectedDate = new DateTimeOffset(fromDate.AddMonths(1));
+            _toDate.SelectedDate = new DateTimeOffset(fromDate.AddMonths(1).AddDays(-1));
         }
         finally
         {

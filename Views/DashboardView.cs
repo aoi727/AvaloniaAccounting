@@ -27,8 +27,8 @@ public sealed class DashboardView : UserControl
     private readonly WrapPanel _summary = new()
     {
         Orientation = Orientation.Horizontal,
-        ItemWidth = 140,
-        ItemHeight = 78
+        ItemWidth = 190,
+        ItemHeight = 84
     };
     private readonly TextBlock _message = ViewHelpers.Body("ホーム画面を読み込み中です。");
 
@@ -280,12 +280,12 @@ public sealed class DashboardView : UserControl
     {
         return new Border
         {
-            Width = 140,
+            Width = 190,
             Background = Brushes.White,
             BorderBrush = Brush.Parse("#D9DEE7"),
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(8),
-            Padding = new Thickness(12, 10),
+            Padding = new Thickness(14, 10),
             Child = new StackPanel
             {
                 Spacing = 2,
@@ -300,9 +300,10 @@ public sealed class DashboardView : UserControl
                     new TextBlock
                     {
                         Text = value,
-                        FontSize = 22,
+                        FontSize = 21,
                         FontWeight = FontWeight.SemiBold,
-                        Foreground = Brush.Parse("#172033")
+                        Foreground = Brush.Parse("#172033"),
+                        TextWrapping = TextWrapping.NoWrap
                     }
                 }
             }

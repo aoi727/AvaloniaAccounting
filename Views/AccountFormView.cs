@@ -16,7 +16,7 @@ public sealed class AccountFormView : UserControl
     private readonly PostgresDatabase _database;
     private readonly AppUser _user;
     private readonly Action _backToDashboard;
-    private readonly Action<int?> _openSubAccountForm;
+    private readonly Action<int?, bool> _openSubAccountForm;
     private readonly TextBox _code = new() { PlaceholderText = "例: 1120" };
     private readonly TextBox _name = new() { PlaceholderText = "例: 普通預金" };
     private readonly ComboBox _accountType = new() { ItemsSource = AccountTypes, SelectedIndex = 0 };
@@ -30,7 +30,7 @@ public sealed class AccountFormView : UserControl
     private readonly List<TaxCode> _taxCodes = [];
     private int? _editingAccountId;
 
-    public AccountFormView(PostgresDatabase database, AppUser user, Action backToDashboard, Action<int?> openSubAccountForm)
+    public AccountFormView(PostgresDatabase database, AppUser user, Action backToDashboard, Action<int?, bool> openSubAccountForm)
     {
         _database = database;
         _user = user;
@@ -53,7 +53,7 @@ public sealed class AccountFormView : UserControl
         var openSubAccountButton = ViewHelpers.SecondaryButton("補助科目管理へ");
         openSubAccountButton.Width = 180;
         openSubAccountButton.HorizontalAlignment = HorizontalAlignment.Left;
-        openSubAccountButton.Click += (_, _) => _openSubAccountForm(_editingAccountId);
+        openSubAccountButton.Click += (_, _) => _openSubAccountForm(_editingAccountId, true);
 
         var form = ViewHelpers.Panel(new StackPanel
         {
@@ -209,7 +209,7 @@ public sealed class AccountFormView : UserControl
 
         var subAccountButton = ViewHelpers.SecondaryButton("補助科目");
         subAccountButton.Width = 110;
-        subAccountButton.Click += (_, _) => _openSubAccountForm(account.AccountId);
+        subAccountButton.Click += (_, _) => _openSubAccountForm(account.AccountId, true);
 
         var row = new Grid
         {

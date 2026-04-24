@@ -15,30 +15,31 @@ public sealed class MainWindow : Window
         Title = "会計ソフト";
         Width = 1500;
         Height = 820;
-        MinWidth = 1280;
-        MinHeight = 720;
+        MinWidth = 960;
+        MinHeight = 600;
+        WindowStartupLocation = WindowStartupLocation.CenterScreen;
         ShowLogin();
     }
 
     private void ShowLogin()
     {
         _currentUser = null;
-        Content = new LoginView(_database, ShowCompanySelection);
+        SetContent(new LoginView(_database, ShowCompanySelection));
     }
 
     private void ShowCompanySelection(AppUser user)
     {
         _currentUser = user;
-        Content = new CompanySelectionView(_database, user, ShowLogin, ShowDashboard);
+        SetContent(new CompanySelectionView(_database, user, ShowLogin, ShowDashboard));
     }
 
     private void ShowDashboard(AppUser user)
     {
         _currentUser = user;
-        Content = new DashboardView(_database, user, ShowLogin, () => ShowSubAccountForm(), ShowAccountForm, ShowBusinessPartnerForm, ShowUserForm, ShowJournalForm, ShowJournalBook, ShowCashbook, ShowGeneralLedger, ShowTrialBalance, ShowBalanceSheet, ShowProfitAndLoss, ShowCompanySettings);
+        SetContent(new DashboardView(_database, user, ShowLogin, () => ShowSubAccountForm(), ShowAccountForm, ShowBusinessPartnerForm, ShowUserForm, ShowJournalForm, ShowJournalBook, ShowCashbook, ShowGeneralLedger, ShowTrialBalance, ShowBalanceSheet, ShowProfitAndLoss, ShowCompanySettings));
     }
 
-    private void ShowSubAccountForm(int? accountId = null)
+    private void ShowSubAccountForm(int? accountId = null, bool returnToAccountForm = false)
     {
         if (_currentUser is null)
         {
@@ -46,7 +47,8 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new SubAccountFormView(_database, _currentUser, () => ShowDashboard(_currentUser), accountId);
+        Action? backToAccountForm = returnToAccountForm ? ShowAccountForm : null;
+        SetContent(new SubAccountFormView(_database, _currentUser, () => ShowDashboard(_currentUser), backToAccountForm, accountId));
     }
 
     private void ShowAccountForm()
@@ -57,7 +59,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new AccountFormView(_database, _currentUser, () => ShowDashboard(_currentUser), ShowSubAccountForm);
+        SetContent(new AccountFormView(_database, _currentUser, () => ShowDashboard(_currentUser), ShowSubAccountForm));
     }
 
     private void ShowUserForm()
@@ -68,7 +70,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new UserFormView(_database, _currentUser, () => ShowDashboard(_currentUser));
+        SetContent(new UserFormView(_database, _currentUser, () => ShowDashboard(_currentUser)));
     }
 
     private void ShowBusinessPartnerForm()
@@ -79,7 +81,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new BusinessPartnerFormView(_database, _currentUser, () => ShowDashboard(_currentUser));
+        SetContent(new BusinessPartnerFormView(_database, _currentUser, () => ShowDashboard(_currentUser)));
     }
 
     private void ShowJournalForm()
@@ -95,7 +97,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new JournalEntryFormView(_database, _currentUser, () => ShowDashboard(_currentUser), entryNumber);
+        SetContent(new JournalEntryFormView(_database, _currentUser, () => ShowDashboard(_currentUser), entryNumber));
     }
 
     private void ShowJournalFormFromJournalBook(string? entryNumber)
@@ -106,7 +108,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new JournalEntryFormView(_database, _currentUser, ShowJournalBook, entryNumber);
+        SetContent(new JournalEntryFormView(_database, _currentUser, ShowJournalBook, entryNumber));
     }
 
     private void ShowCashbook()
@@ -117,7 +119,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new CashbookView(_database, _currentUser, () => ShowDashboard(_currentUser), ShowJournalForm);
+        SetContent(new CashbookView(_database, _currentUser, () => ShowDashboard(_currentUser), ShowJournalForm));
     }
 
     private void ShowGeneralLedger()
@@ -128,7 +130,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new GeneralLedgerView(_database, _currentUser, () => ShowDashboard(_currentUser), ShowJournalForm);
+        SetContent(new GeneralLedgerView(_database, _currentUser, () => ShowDashboard(_currentUser), ShowJournalForm));
     }
 
     private void ShowTrialBalance()
@@ -139,7 +141,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new TrialBalanceView(_database, _currentUser, () => ShowDashboard(_currentUser));
+        SetContent(new TrialBalanceView(_database, _currentUser, () => ShowDashboard(_currentUser)));
     }
 
     private void ShowBalanceSheet()
@@ -150,7 +152,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new BalanceSheetView(_database, _currentUser, () => ShowDashboard(_currentUser));
+        SetContent(new BalanceSheetView(_database, _currentUser, () => ShowDashboard(_currentUser)));
     }
 
     private void ShowProfitAndLoss()
@@ -161,7 +163,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new ProfitAndLossView(_database, _currentUser, () => ShowDashboard(_currentUser));
+        SetContent(new ProfitAndLossView(_database, _currentUser, () => ShowDashboard(_currentUser)));
     }
 
     private void ShowCompanySettings()
@@ -172,7 +174,7 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new CompanySettingsView(_database, _currentUser, () => ShowDashboard(_currentUser), ShowDashboard);
+        SetContent(new CompanySettingsView(_database, _currentUser, () => ShowDashboard(_currentUser), ShowDashboard));
     }
 
     private void ShowJournalBook()
@@ -183,6 +185,16 @@ public sealed class MainWindow : Window
             return;
         }
 
-        Content = new JournalBookView(_database, _currentUser, () => ShowDashboard(_currentUser), ShowJournalFormFromJournalBook);
+        SetContent(new JournalBookView(_database, _currentUser, () => ShowDashboard(_currentUser), ShowJournalFormFromJournalBook));
+    }
+
+    private void SetContent(Control view)
+    {
+        Content = new ScrollViewer
+        {
+            HorizontalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = Avalonia.Controls.Primitives.ScrollBarVisibility.Auto,
+            Content = view
+        };
     }
 }

@@ -14,11 +14,12 @@ public sealed class SubAccountFormView : UserControl
     private readonly PostgresDatabase _database;
     private readonly AppUser _user;
     private readonly Action _backToDashboard;
+    private readonly Action? _backToAccountForm;
     private readonly int? _initialAccountId;
     private readonly ComboBox _account = new();
     private readonly TextBox _code = new() { PlaceholderText = "例: YOKOHAMA-001 / CUST-001" };
-    private readonly TextBox _name = new() { PlaceholderText = "例: 横浜銀行 普通預金 1234567" };
-    private readonly TextBox _externalCode = new() { PlaceholderText = "銀行口座番号、得意先IDなど" };
+    private readonly TextBox _name = new() { PlaceholderText = "例: 横浜営業所 / 得意先 1234567" };
+    private readonly TextBox _externalCode = new() { PlaceholderText = "外部システム連携コードなど" };
     private readonly TextBox _balance = new() { Text = "0" };
     private readonly StackPanel _subAccounts = new() { Spacing = 8 };
     private readonly TextBlock _message = ViewHelpers.Body("補助科目を登録できます。");
@@ -26,11 +27,17 @@ public sealed class SubAccountFormView : UserControl
     private readonly Button _newButton = ViewHelpers.SecondaryButton("新規に戻す");
     private int? _editingSubAccountId;
 
-    public SubAccountFormView(PostgresDatabase database, AppUser user, Action backToDashboard, int? initialAccountId = null)
+    public SubAccountFormView(
+        PostgresDatabase database,
+        AppUser user,
+        Action backToDashboard,
+        Action? backToAccountForm = null,
+        int? initialAccountId = null)
     {
         _database = database;
         _user = user;
         _backToDashboard = backToDashboard;
+        _backToAccountForm = backToAccountForm;
         _initialAccountId = initialAccountId;
         Content = Build();
         _saveButton.Click += async (_, _) => await SaveAsync();
@@ -41,10 +48,27 @@ public sealed class SubAccountFormView : UserControl
 
     private Control Build()
     {
-        var backButton = ViewHelpers.SecondaryButton("ホームに戻る");
-        backButton.Width = 140;
-        backButton.HorizontalAlignment = HorizontalAlignment.Left;
-        backButton.Click += (_, _) => _backToDashboard();
+        var navigationButtons = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 12,
+            HorizontalAlignment = HorizontalAlignment.Left
+        };
+
+        var backToDashboardButton = ViewHelpers.SecondaryButton("ホームに戻る");
+        backToDashboardButton.Width = 140;
+        backToDashboardButton.HorizontalAlignment = HorizontalAlignment.Left;
+        backToDashboardButton.Click += (_, _) => _backToDashboard();
+        navigationButtons.Children.Add(backToDashboardButton);
+
+        if (_backToAccountForm is not null)
+        {
+            var backToAccountButton = ViewHelpers.SecondaryButton("科目登録へ戻る");
+            backToAccountButton.Width = 160;
+            backToAccountButton.HorizontalAlignment = HorizontalAlignment.Left;
+            backToAccountButton.Click += (_, _) => _backToAccountForm();
+            navigationButtons.Children.Add(backToAccountButton);
+        }
 
         var form = ViewHelpers.Panel(new StackPanel
         {
@@ -52,7 +76,7 @@ public sealed class SubAccountFormView : UserControl
             Children =
             {
                 ViewHelpers.Heading("補助科目登録"),
-                ViewHelpers.Body("銀行口座、得意先、仕入先などを主科目に紐づけます。"),
+                ViewHelpers.Body("外部管理コードや残高などを主科目に紐づけて登録します。"),
                 ViewHelpers.Label("主科目"),
                 _account,
                 ViewHelpers.Label("補助コード"),
@@ -61,7 +85,7 @@ public sealed class SubAccountFormView : UserControl
                 _name,
                 ViewHelpers.Label("外部コード"),
                 _externalCode,
-                ViewHelpers.Label("初期残高"),
+                ViewHelpers.Label("開始残高"),
                 _balance,
                 new Border { Height = 8 },
                 _saveButton,
@@ -77,7 +101,7 @@ public sealed class SubAccountFormView : UserControl
             RowDefinitions = new RowDefinitions("Auto,18,*"),
             Children =
             {
-                Header(backButton),
+                Header(navigationButtons),
                 form,
                 ExistingList()
             }
@@ -89,7 +113,7 @@ public sealed class SubAccountFormView : UserControl
         return new ScrollViewer { Content = content };
     }
 
-    private Control Header(Control backButton)
+    private Control Header(Control navigationButtons)
     {
         var header = new Grid
         {
@@ -104,10 +128,10 @@ public sealed class SubAccountFormView : UserControl
                         ViewHelpers.Body("補助科目マスタ")
                     }
                 },
-                backButton
+                navigationButtons
             }
         };
-        Grid.SetColumn(backButton, 1);
+        Grid.SetColumn(navigationButtons, 1);
         Grid.SetColumnSpan(header, 3);
         return header;
     }
@@ -142,7 +166,7 @@ public sealed class SubAccountFormView : UserControl
             else
             {
                 _saveButton.IsEnabled = false;
-                SetMessage("補助科目を持つ主科目がありません。勘定科目の is_control_account を確認してください。", true);
+                SetMessage("補助科目を持てる主科目がありません。勘定科目の is_control_account を確認してください。", true);
             }
 
             await LoadSubAccountsAsync();
@@ -193,7 +217,7 @@ public sealed class SubAccountFormView : UserControl
 
         if (!decimal.TryParse(_balance.Text, NumberStyles.Number, CultureInfo.CurrentCulture, out var balance))
         {
-            SetMessage("初期残高は数値で入力してください。", true);
+            SetMessage("開始残高は数値で入力してください。", true);
             return;
         }
 

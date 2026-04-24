@@ -361,8 +361,9 @@ public sealed class JournalBookView : UserControl
                 return;
             }
 
-            _message.Text = $"PDFを保存しました: {file.Name}";
-            _message.Foreground = Brush.Parse("#1E6B52");
+            var previewError = PdfPreviewLauncher.Open(file.Path.LocalPath);
+            _message.Text = previewError ?? $"PDFを保存しました: {file.Name}";
+            _message.Foreground = previewError is null ? Brush.Parse("#1E6B52") : Brush.Parse("#B8860B");
         }
         catch (Exception ex)
         {
@@ -516,7 +517,7 @@ public sealed class JournalBookView : UserControl
         try
         {
             deleteButton.IsEnabled = false;
-            await _database.DeleteJournalVoucherAsync(_user.CompanyId, entryNumber);
+            await _database.DeleteJournalVoucherAsync(_user.CompanyId, _user.UserId, entryNumber);
             await LoadAsync();
             _message.Text = $"仕訳を削除しました: {entryNumber}";
             _message.Foreground = Brush.Parse("#1E6B52");

@@ -37,10 +37,12 @@ public sealed class CompanySettingsView : UserControl
     private readonly TextBlock _carryForwardAccount = ViewHelpers.Body("");
     private readonly TextBlock _carryForwardAmount = ViewHelpers.Body("");
     private readonly TextBlock _carryForwardStatus = ViewHelpers.Body("");
+    private readonly TextBox _unlockReason = new() { PlaceholderText = "修正理由を入力してください" };
     private readonly TextBlock _message = ViewHelpers.Body("会社設定を読み込み中です。");
     private readonly Button _saveButton = ViewHelpers.PrimaryButton("会社情報を保存");
     private readonly Button _addCompanyButton = ViewHelpers.SecondaryButton("新しい会社を追加");
-    private readonly Button _carryForwardButton = ViewHelpers.SecondaryButton("年次繰越を実行");
+    private readonly Button _carryForwardButton = ViewHelpers.SecondaryButton("年度締めを実行");
+    private readonly Button _unlockClosingButton = ViewHelpers.SecondaryButton("年度締めを解除");
 
     public CompanySettingsView(PostgresDatabase database, AppUser user, Action backToDashboard, Action<AppUser> switchCompany)
     {
@@ -52,6 +54,7 @@ public sealed class CompanySettingsView : UserControl
         _saveButton.Click += async (_, _) => await SaveAsync();
         _addCompanyButton.Click += async (_, _) => await AddCompanyAsync();
         _carryForwardButton.Click += async (_, _) => await ExecuteCarryForwardAsync();
+        _unlockClosingButton.Click += async (_, _) => await UnlockClosingAsync();
         _isTaxExempt.IsCheckedChanged += (_, _) => ApplyTaxExemptState(_taxEntryMethod, _isTaxExempt);
         _newIsTaxExempt.IsCheckedChanged += (_, _) => ApplyTaxExemptState(_newTaxEntryMethod, _newIsTaxExempt);
         _ = LoadAsync();
@@ -88,17 +91,17 @@ public sealed class CompanySettingsView : UserControl
             Children =
             {
                 ViewHelpers.Heading("現在の会社", 20),
-                ViewHelpers.Body("会社名、期首日、締め日、消費税の設定を変更できます。免税事業者にすると総額方式に固定され、仕訳入力から税関連欄が非表示になります。"),
+                ViewHelpers.Body("会社名、会計年度開始日、締め日、消費税の設定を管理します。"),
                 ViewHelpers.Label("会社名"),
                 _companyName,
-                ViewHelpers.Label("会計年度期首日"),
+                ViewHelpers.Label("会計年度開始日"),
                 _fiscalYearStart,
                 ViewHelpers.Label("締め日"),
                 _closingDay,
                 _isTaxExempt,
                 ViewHelpers.Label("消費税記帳方式"),
                 _taxEntryMethod,
-                ViewHelpers.Body("免税事業者を選択した場合は総額方式に固定されます。"),
+                ViewHelpers.Body("免税事業者では税込方式に固定されます。"),
                 new Border { Height = 8 },
                 _saveButton
             }
@@ -111,10 +114,10 @@ public sealed class CompanySettingsView : UserControl
             Children =
             {
                 ViewHelpers.Heading("会社を追加", 20),
-                ViewHelpers.Body("現在のユーザーに新しい会社を追加します。免税事業者にすると新会社でも総額方式が固定されます。"),
+                ViewHelpers.Body("現在のユーザーに新しい会社を追加します。"),
                 ViewHelpers.Label("会社名"),
                 _newCompanyName,
-                ViewHelpers.Label("会計年度期首日"),
+                ViewHelpers.Label("会計年度開始日"),
                 _newFiscalYearStart,
                 ViewHelpers.Label("締め日"),
                 _newClosingDay,
@@ -127,6 +130,7 @@ public sealed class CompanySettingsView : UserControl
         });
 
         _carryForwardButton.Width = 180;
+        _unlockClosingButton.Width = 180;
 
         var carryForwardPanel = ViewHelpers.Panel(new StackPanel
         {
@@ -134,18 +138,21 @@ public sealed class CompanySettingsView : UserControl
             Spacing = 6,
             Children =
             {
-                ViewHelpers.Heading("年次繰越", 20),
-                ViewHelpers.Body("前期の損益残高を資本勘定へ振り替える年次繰越仕訳を作成します。"),
+                ViewHelpers.Heading("年度締め", 20),
+                ViewHelpers.Body("対象年度を締め、翌年度開始日の繰越仕訳を作成または更新します。締め済み年度は仕訳の保存・削除がロックされます。"),
                 ViewHelpers.Label("対象期間"),
                 _carryForwardPeriod,
-                ViewHelpers.Label("繰越先勘定"),
+                ViewHelpers.Label("繰越先の資本科目"),
                 _carryForwardAccount,
-                ViewHelpers.Label("純利益"),
+                ViewHelpers.Label("当期純利益"),
                 _carryForwardAmount,
-                ViewHelpers.Label("実行状態"),
+                ViewHelpers.Label("締め状態"),
                 _carryForwardStatus,
+                ViewHelpers.Label("締め解除理由"),
+                _unlockReason,
                 new Border { Height = 8 },
-                _carryForwardButton
+                _carryForwardButton,
+                _unlockClosingButton
             }
         });
 
@@ -199,15 +206,13 @@ public sealed class CompanySettingsView : UserControl
     {
         if (_closingDay.SelectedItem is not ClosingDayOption closingDay)
         {
-            _message.Text = "締め日を選択してください。";
-            _message.Foreground = Brush.Parse("#B42318");
+            SetError("締め日を選択してください。");
             return;
         }
 
         if (_taxEntryMethod.SelectedItem is not TaxEntryMethodOption taxEntryMethod)
         {
-            _message.Text = "消費税記帳方式を選択してください。";
-            _message.Foreground = Brush.Parse("#B42318");
+            SetError("消費税記帳方式を選択してください。");
             return;
         }
 
@@ -231,8 +236,7 @@ public sealed class CompanySettingsView : UserControl
         }
         catch (Exception ex)
         {
-            _message.Text = ex.Message;
-            _message.Foreground = Brush.Parse("#B42318");
+            SetError(ex.Message);
         }
         finally
         {
@@ -244,15 +248,13 @@ public sealed class CompanySettingsView : UserControl
     {
         if (_newClosingDay.SelectedItem is not ClosingDayOption closingDay)
         {
-            _message.Text = "新しい会社の締め日を選択してください。";
-            _message.Foreground = Brush.Parse("#B42318");
+            SetError("新しい会社の締め日を選択してください。");
             return;
         }
 
         if (_newTaxEntryMethod.SelectedItem is not TaxEntryMethodOption taxEntryMethod)
         {
-            _message.Text = "新しい会社の消費税記帳方式を選択してください。";
-            _message.Foreground = Brush.Parse("#B42318");
+            SetError("新しい会社の消費税記帳方式を選択してください。");
             return;
         }
 
@@ -281,8 +283,7 @@ public sealed class CompanySettingsView : UserControl
         }
         catch (Exception ex)
         {
-            _message.Text = ex.Message;
-            _message.Foreground = Brush.Parse("#B42318");
+            SetError(ex.Message);
         }
         finally
         {
@@ -296,20 +297,27 @@ public sealed class CompanySettingsView : UserControl
         _carryForwardPeriod.Text = $"{status.SourceFiscalYearStart:yyyy/MM/dd} から {status.SourceFiscalYearEnd:yyyy/MM/dd} を締めて {status.NextFiscalYearStart:yyyy/MM/dd} に繰越";
         _carryForwardAccount.Text = status.EquityAccountDisplayName;
         _carryForwardAmount.Text = FormatFinancialStatementAmount(status.NetIncome);
+        _unlockReason.Text = "";
 
-        if (status.AlreadyExecuted)
+        if (status.IsClosed)
         {
             _carryForwardStatus.Text = status.ExecutedAt.HasValue
-                ? $"実行済み: {status.EntryNumber} ({status.ExecutedAt:yyyy/MM/dd HH:mm})"
-                : $"実行済み: {status.EntryNumber}";
+                ? $"締め済み: {status.EntryNumber} ({status.ExecutedAt:yyyy/MM/dd HH:mm})"
+                : $"締め済み: {status.EntryNumber}";
             _carryForwardStatus.Foreground = Brush.Parse("#1E6B52");
             _carryForwardButton.IsEnabled = false;
+            _unlockReason.IsEnabled = true;
+            _unlockClosingButton.IsEnabled = true;
             return;
         }
 
-        _carryForwardStatus.Text = "未実行";
+        _carryForwardStatus.Text = status.AlreadyExecuted
+            ? $"解除中: 再締めで繰越仕訳を更新します ({status.EntryNumber})"
+            : "未締め";
         _carryForwardStatus.Foreground = Brush.Parse("#4A5568");
         _carryForwardButton.IsEnabled = true;
+        _unlockReason.IsEnabled = false;
+        _unlockClosingButton.IsEnabled = false;
     }
 
     private async Task ExecuteCarryForwardAsync()
@@ -317,17 +325,40 @@ public sealed class CompanySettingsView : UserControl
         try
         {
             _carryForwardButton.IsEnabled = false;
-            await _database.ExecuteAnnualCarryForwardAsync(_user.CompanyId, _user.UserId, DateTime.Today);
+            await _database.CloseFiscalYearAsync(_user.CompanyId, _user.UserId, DateTime.Today);
             await LoadCarryForwardStatusAsync();
-            _message.Text = "年次繰越を実行しました。";
+            _message.Text = "年度締めを実行しました。";
             _message.Foreground = Brush.Parse("#1E6B52");
         }
         catch (Exception ex)
         {
-            _message.Text = ex.Message;
-            _message.Foreground = Brush.Parse("#B42318");
+            SetError(ex.Message);
             await LoadCarryForwardStatusAsync();
         }
+    }
+
+    private async Task UnlockClosingAsync()
+    {
+        try
+        {
+            var status = await _database.GetAnnualCarryForwardStatusAsync(_user.CompanyId, DateTime.Today);
+            _unlockClosingButton.IsEnabled = false;
+            await _database.UnlockAnnualClosingAsync(_user.CompanyId, _user.UserId, status.SourceFiscalYearStart, _unlockReason.Text ?? "");
+            await LoadCarryForwardStatusAsync();
+            _message.Text = "年度締めを解除しました。修正後は再度年度締めを実行してください。";
+            _message.Foreground = Brush.Parse("#1E6B52");
+        }
+        catch (Exception ex)
+        {
+            SetError(ex.Message);
+            await LoadCarryForwardStatusAsync();
+        }
+    }
+
+    private void SetError(string message)
+    {
+        _message.Text = message;
+        _message.Foreground = Brush.Parse("#B42318");
     }
 
     private static void ApplyTaxExemptState(ComboBox taxEntryMethod, CheckBox isTaxExempt)
@@ -353,7 +384,7 @@ public sealed class CompanySettingsView : UserControl
     {
         return
         [
-            new("gross", "総額方式"),
+            new("gross", "税込方式"),
             new("net", "税抜方式")
         ];
     }

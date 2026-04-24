@@ -645,8 +645,9 @@ public sealed class BalanceSheetView : UserControl
         {
             _exportPdfButton.IsEnabled = false;
             await BalanceSheetPdfExporter.ExportAsync(file.Path.LocalPath, _user.CompanyName, asOfDate, _currentSummary);
-            _message.Text = $"PDFを書き出しました: {file.Name}";
-            _message.Foreground = Brush.Parse("#1E6B52");
+            var previewError = PdfPreviewLauncher.Open(file.Path.LocalPath);
+            _message.Text = previewError ?? $"PDFを書き出しました: {file.Name}";
+            _message.Foreground = previewError is null ? Brush.Parse("#1E6B52") : Brush.Parse("#B8860B");
         }
         catch (Exception ex)
         {

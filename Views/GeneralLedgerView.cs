@@ -435,8 +435,9 @@ public sealed class GeneralLedgerView : UserControl
                 subAccountLabel,
                 _currentCarryForward,
                 _currentLedgerLines);
-            _message.Text = $"PDFを出力しました: {file.Name}";
-            _message.Foreground = Brush.Parse("#1E6B52");
+            var previewError = PdfPreviewLauncher.Open(file.Path.LocalPath);
+            _message.Text = previewError ?? $"PDFを出力しました: {file.Name}";
+            _message.Foreground = previewError is null ? Brush.Parse("#1E6B52") : Brush.Parse("#B8860B");
         }
         catch (Exception ex)
         {

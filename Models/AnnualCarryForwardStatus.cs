@@ -7,5 +7,8 @@ public sealed record AnnualCarryForwardStatus(
     string EquityAccountDisplayName,
     decimal NetIncome,
     bool AlreadyExecuted,
+    bool IsClosed,
     string? EntryNumber,
-    DateTime? ExecutedAt);
+    DateTime? ExecutedAt,
+    string? UnlockReason,
+    DateTime? UnlockedAt);
