@@ -1,4 +1,4 @@
-
+AvaloniaAccounting
 Copyright (C) 2026 aoi727
 
                     GNU GENERAL PUBLIC LICENSE
